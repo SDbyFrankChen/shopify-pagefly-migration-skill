@@ -20,9 +20,108 @@ Migrate a Shopify product page from a third-party page builder (PageFly, GemPage
 
 ## Prerequisites
 
-- Shopify Admin API access (scopes: `write_themes`, `read_products`, `write_products`)
-- A script/credential system for `PUT /admin/api/YYYY-MM/themes/{id}/assets.json`
-- At least one existing set of reusable custom Liquid sections (see "Section Library" below). First migration bootstraps the library; subsequent migrations reuse it.
+Before running the workflow, complete the following setup. Budget 15–30 minutes the first time; subsequent migrations reuse everything.
+
+### 1. Shopify store admin access
+
+You need to be a store owner or a staff account with "Apps and channels" and "Themes" permissions. If you are not the owner, the owner must grant these.
+
+### 2. Create a custom Shopify app
+
+From the Shopify admin:
+
+1. **Settings → Apps and sales channels → Develop apps**
+2. Click **Create an app**, name it something like `Claude Migration Tool`
+3. Open the app → **Configuration → Admin API integration → Configure**
+4. Enable these scopes:
+   - `write_themes` — upload section/template files
+   - `read_products`, `write_products` — read handle, update `template_suffix`
+   - `read_themes` — list themes to find the main theme ID
+   - (Optional) `write_files`, `read_files` — if your sections reference CDN assets you upload
+5. Save, then **API credentials → Install app**
+6. After install, copy the **Admin API access token** (shown once — if you miss it, rotate and copy again)
+7. Also copy the **API key** and **API secret key** (only needed if you prefer OAuth `client_credentials` exchange instead of a static token)
+
+> **Note**: Shopify offers two auth paths: a static **Admin API access token** (simpler, preferred for this workflow) or **OAuth `client_credentials`** exchange (tokens expire every 24 hours). The workflow below assumes the static token.
+
+### 3. Store credentials in a `.env` file
+
+Create a `.env` file at your working root (never check it into git):
+
+```bash
+SHOPIFY_STORE=your-store.myshopify.com
+SHOPIFY_ACCESS_TOKEN=shpat_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# If using OAuth client_credentials instead:
+# SHOPIFY_CLIENT_ID=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+# SHOPIFY_CLIENT_SECRET=xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
+
+Add `.env` to `.gitignore` immediately.
+
+### 4. Identify the theme ID
+
+The workflow uploads assets to the **main (published) theme**. To find its ID:
+
+```bash
+curl -sX GET "https://$SHOPIFY_STORE/admin/api/2024-10/themes.json" \
+  -H "X-Shopify-Access-Token: $SHOPIFY_ACCESS_TOKEN" \
+  | python3 -c "import sys,json; print([t for t in json.load(sys.stdin)['themes'] if t['role']=='main'][0]['id'])"
+```
+
+For safety during development, consider duplicating the main theme and pointing your upload script at the duplicate until you verify the result, then promoting.
+
+### 5. Theme development permissions
+
+The user driving the migration must be able to:
+
+- **Preview a template** — test `https://store.com/products/handle?view=<suffix>` from a browser logged in as store staff (customer sessions do not see unpublished templates)
+- **Publish a theme** — if you work on a duplicate theme and want to promote it after verification
+- **Access the page builder** — PageFly/GemPages/Shogun have their own admin pages. The migrator must be able to hide the source page inside the builder's UI (API access alone is not enough)
+
+### 6. Minimal upload script
+
+A small Python script handles token exchange and asset PUTs. At minimum it needs:
+
+```python
+import os, requests
+from pathlib import Path
+
+STORE = os.environ["SHOPIFY_STORE"]
+TOKEN = os.environ["SHOPIFY_ACCESS_TOKEN"]
+HEADERS = {"X-Shopify-Access-Token": TOKEN, "Content-Type": "application/json"}
+
+def upload_asset(theme_id: int, key: str, path: Path):
+    r = requests.put(
+        f"https://{STORE}/admin/api/2024-10/themes/{theme_id}/assets.json",
+        headers=HEADERS,
+        json={"asset": {"key": key, "value": path.read_text(encoding='utf-8')}},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return r.json()
+```
+
+Keep one `upload.py` per product folder that imports credentials from `.env`. Avoid hardcoding store or theme IDs in checked-in code.
+
+### 7. Reusable custom section library
+
+The workflow assumes you have (or will build during the first migration) a set of custom Liquid sections. Typical files:
+
+- `sections/custom-content-section.liquid`
+- `sections/custom-step-flow.liquid`
+- `sections/custom-feature-grid.liquid`
+- `sections/custom-intro-badge.liquid`
+- `sections/custom-text-block.liquid`
+
+The first migration on a new theme bootstraps this library; every later migration reuses it by referencing the section types in the product template JSON.
+
+### 8. API version
+
+All examples use `2024-10`. Shopify rotates API versions quarterly. Check the Shopify API release notes and bump the version in your script periodically — the Admin REST endpoints used here (`/themes/*/assets.json`, `/products/*.json`) are stable across recent versions.
+
+### 9. Rate limits
+
+Shopify's REST bucket is 40 requests / app / store by default (80 for Plus). A single migration uses perhaps 10–20 calls, so rate limits are not a concern. If you script bulk migrations, watch the `X-Shopify-Shop-Api-Call-Limit` header.
 
 ## The Workflow
 
